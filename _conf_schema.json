@@ -6,6 +6,44 @@
     "default": "",
     "obvious_hint": true
   },
+  "sgdb_api_key": {
+    "description": "SteamGridDB API Key（可选，用于获取游戏封面）",
+    "type": "string",
+    "hint": "从 https://www.steamgriddb.com/profile/preferences/api 获取",
+    "default": ""
+  },
+  "steam_ids": {
+    "description": "要监控的Steam ID列表",
+    "type": "template_list",
+    "hint": "每个ID对应一个要监控的好友，格式如：76561198203485468",
+    "items": {
+      "steam_id": {
+        "description": "Steam ID",
+        "type": "string",
+        "hint": "17位数字，如：76561198203485468"
+      },
+      "nickname": {
+        "description": "好友昵称（可选）",
+        "type": "string",
+        "hint": "留空则自动获取Steam昵称",
+        "default": ""
+      }
+    },
+    "default": []
+  },
+  "notify_groups": {
+    "description": "推送通知的群号列表",
+    "type": "template_list",
+    "hint": "新游戏购买通知将发送到这些群",
+    "items": {
+      "group_id": {
+        "description": "群号",
+        "type": "string",
+        "hint": "如：123456789"
+      }
+    },
+    "default": []
+  },
   "poll_interval": {
     "description": "轮询间隔（分钟）",
     "type": "int",
@@ -13,16 +51,16 @@
     "default": 30,
     "options": [15, 30, 60, 120]
   },
-  "notify_group": {
-    "description": "通知发送目标",
-    "type": "string",
-    "hint": "留空则在触发消息的会话中通知",
-    "default": ""
-  },
   "enable_notification": {
     "description": "启用新游戏通知",
     "type": "bool",
     "hint": "当好友购买新游戏时发送通知",
+    "default": true
+  },
+  "render_image": {
+    "description": "启用图片渲染通知",
+    "type": "bool",
+    "hint": "将新游戏信息渲染成图片发送（需要Pillow）",
     "default": true
   }
 }
