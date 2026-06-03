@@ -38,27 +38,27 @@
 
 ### 添加监控好友
 ```
-/steam add <steam_id> [昵称]
+/steamlib add <steam_id> [昵称]
 ```
 
 示例：
 ```
-/steam add 76561198012345678 小明
+/steamlib add 76561198012345678 小明
 ```
 
 ### 删除监控好友
 ```
-/steam del <steam_id>
+/steamlib del <steam_id>
 ```
 
 ### 查看监控列表
 ```
-/steam list
+/steamlib list
 ```
 
 ### 立即检查游戏库变动
 ```
-/steam check [steam_id]
+/steamlib check [steam_id]
 ```
 
 - 不指定steam_id：检查所有好友
@@ -66,12 +66,12 @@
 
 ### 查看好友详细信息
 ```
-/steam info <steam_id>
+/steamlib info <steam_id>
 ```
 
 ### 显示帮助
 ```
-/steam help
+/steamlib help
 ```
 
 ## 如何获取Steam ID

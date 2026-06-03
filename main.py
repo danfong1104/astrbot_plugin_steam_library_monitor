@@ -185,12 +185,12 @@ class SteamLibraryMonitor(Star):
             # 如果没有指定通知目标，记录日志
             logger.info(f"{nickname} 购买了新游戏: {', '.join(game_names)}")
 
-    @filter.command_group("steam")
-    def steam(self):
+    @filter.command_group("steamlib")
+    def steamlib(self):
         """Steam游戏库监控命令组。"""
         pass
 
-    @steam.command("add", alias={"添加好友"})
+    @steamlib.command("add", alias={"sl添加", "sladd"})
     async def add_friend(self, event: AstrMessageEvent, steam_id: str, nickname: str = ""):
         """添加要监控的Steam好友。"""
         if not self.steam_api_key:
@@ -231,7 +231,7 @@ class SteamLibraryMonitor(Star):
 
         yield event.plain_result(result_msg)
 
-    @steam.command("del", alias={"删除好友"})
+    @steamlib.command("del", alias={"sl删除", "sldel"})
     async def del_friend(self, event: AstrMessageEvent, steam_id: str):
         """删除监控的Steam好友。"""
         if steam_id not in self.friends:
@@ -249,11 +249,11 @@ class SteamLibraryMonitor(Star):
 
         yield event.plain_result(f"✅ 已删除监控好友: {nickname}")
 
-    @steam.command("list", alias={"列表"})
+    @steamlib.command("list", alias={"sl列表", "sllist"})
     async def list_friends(self, event: AstrMessageEvent):
         """查看监控的好友列表。"""
         if not self.friends:
-            yield event.plain_result("📋 监控列表为空，使用 /steam add <steam_id> 添加好友")
+            yield event.plain_result("📋 监控列表为空，使用 /steamlib add <steam_id> 添加好友")
             return
 
         lines = ["📋 Steam好友监控列表:\n"]
@@ -265,7 +265,7 @@ class SteamLibraryMonitor(Star):
 
         yield event.plain_result("\n".join(lines))
 
-    @steam.command("check", alias={"检查"})
+    @steamlib.command("check", alias={"sl检查", "slcheck"})
     async def check_now(self, event: AstrMessageEvent, steam_id: str = ""):
         """立即检查游戏库变动。"""
         if not self.steam_api_key:
@@ -308,7 +308,7 @@ class SteamLibraryMonitor(Star):
             else:
                 yield event.plain_result("✅ 所有好友暂无新增游戏")
 
-    @steam.command("info", alias={"信息"})
+    @steamlib.command("info", alias={"sl信息", "slinfo"})
     async def friend_info(self, event: AstrMessageEvent, steam_id: str):
         """查看好友详细信息。"""
         if steam_id not in self.friends:
@@ -337,22 +337,22 @@ class SteamLibraryMonitor(Star):
 
         yield event.plain_result("\n".join(lines))
 
-    @steam.command("help", alias={"帮助"})
+    @steamlib.command("help", alias={"sl帮助", "slhelp"})
     async def help(self, event: AstrMessageEvent):
         """显示帮助信息。"""
         help_text = """🎮 Steam游戏库监控插件
 
 📌 命令列表:
-  /steam add <steam_id> [昵称] - 添加监控好友
-  /steam del <steam_id> - 删除监控好友
-  /steam list - 查看监控列表
-  /steam check [steam_id] - 立即检查游戏库变动
-  /steam info <steam_id> - 查看好友详细信息
-  /steam help - 显示此帮助
+  /steamlib add <steam_id> [昵称] - 添加监控好友
+  /steamlib del <steam_id> - 删除监控好友
+  /steamlib list - 查看监控列表
+  /steamlib check [steam_id] - 立即检查游戏库变动
+  /steamlib info <steam_id> - 查看好友详细信息
+  /steamlib help - 显示此帮助
 
 💡 使用说明:
 1. 先在插件配置中设置 Steam Web API Key
-2. 使用 /steam add 命令添加要监控的好友
+2. 使用 /steamlib add 命令添加要监控的好友
 3. 插件会自动定期检查游戏库变动
 4. 当好友购买新游戏时会收到通知
 
