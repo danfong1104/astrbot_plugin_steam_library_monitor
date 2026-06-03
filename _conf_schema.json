@@ -1,0 +1,28 @@
+{
+  "steam_api_key": {
+    "description": "Steam Web API Key",
+    "type": "string",
+    "hint": "从 https://steamcommunity.com/dev/apikey 获取",
+    "default": "",
+    "obvious_hint": true
+  },
+  "poll_interval": {
+    "description": "轮询间隔（分钟）",
+    "type": "int",
+    "hint": "检查好友游戏库变动的时间间隔",
+    "default": 30,
+    "options": [15, 30, 60, 120]
+  },
+  "notify_group": {
+    "description": "通知发送目标",
+    "type": "string",
+    "hint": "留空则在触发消息的会话中通知",
+    "default": ""
+  },
+  "enable_notification": {
+    "description": "启用新游戏通知",
+    "type": "bool",
+    "hint": "当好友购买新游戏时发送通知",
+    "default": true
+  }
+}
