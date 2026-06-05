@@ -35,10 +35,10 @@ class SteamLibraryMonitor(Star):
         self.enable_notification: bool = config.get("enable_notification", True)
         self.render_image: bool = config.get("render_image", True)
 
-        # 从配置中获取Steam ID列表
-        self.steam_ids_config: list[dict] = config.get("steam_ids", [])
-        # 从配置中获取推送群号列表
-        self.notify_groups: list[dict] = config.get("notify_groups", [])
+        # 从配置中解析Steam ID列表（文本格式，每行一个）
+        self.steam_ids_config: list[dict] = self._parse_steam_ids(config.get("steam_ids", ""))
+        # 从配置中解析推送群号列表（文本格式，每行一个）
+        self.notify_groups: list[str] = self._parse_groups(config.get("notify_groups", ""))
 
         # 数据文件路径
         self.games_cache_file: Path = self.data_dir / "games_cache.json"
@@ -55,6 +55,45 @@ class SteamLibraryMonitor(Star):
 
         # 启动轮询
         self._start_polling()
+
+    def _parse_steam_ids(self, text: str) -> list[dict]:
+        """解析Steam ID配置文本。
+
+        格式：每行一个，支持 "steam_id:nickname" 或只写 "steam_id"
+        """
+        result = []
+        if not text or not text.strip():
+            return result
+
+        for line in text.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+
+            parts = line.split(":", 1)
+            steam_id = parts[0].strip()
+            nickname = parts[1].strip() if len(parts) > 1 else ""
+
+            if steam_id:
+                result.append({"steam_id": steam_id, "nickname": nickname})
+
+        return result
+
+    def _parse_groups(self, text: str) -> list[str]:
+        """解析群号配置文本。
+
+        格式：每行一个群号
+        """
+        result = []
+        if not text or not text.strip():
+            return result
+
+        for line in text.strip().split("\n"):
+            line = line.strip()
+            if line:
+                result.append(line)
+
+        return result
 
     def _load_json(self, path: Path, default):
         """从JSON文件加载数据。"""
@@ -396,7 +435,7 @@ class SteamLibraryMonitor(Star):
             return
 
         # 获取推送群号列表
-        group_ids = [g.get("group_id", "") for g in self.notify_groups if g.get("group_id")]
+        group_ids = self.notify_groups
 
         if not group_ids:
             logger.info(f"{nickname} 购买了新游戏，但未配置推送群号")

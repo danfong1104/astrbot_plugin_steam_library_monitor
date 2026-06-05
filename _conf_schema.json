@@ -13,36 +13,16 @@
     "default": ""
   },
   "steam_ids": {
-    "description": "要监控的Steam ID列表",
-    "type": "template_list",
-    "hint": "每个ID对应一个要监控的好友，格式如：76561198203485468",
-    "items": {
-      "steam_id": {
-        "description": "Steam ID",
-        "type": "string",
-        "hint": "17位数字，如：76561198203485468"
-      },
-      "nickname": {
-        "description": "好友昵称（可选）",
-        "type": "string",
-        "hint": "留空则自动获取Steam昵称",
-        "default": ""
-      }
-    },
-    "default": []
+    "description": "要监控的Steam ID列表（每行一个）",
+    "type": "text",
+    "hint": "每行一个Steam ID，格式：76561198203485468:昵称（昵称可选）",
+    "default": ""
   },
   "notify_groups": {
-    "description": "推送通知的群号列表",
-    "type": "template_list",
-    "hint": "新游戏购买通知将发送到这些群",
-    "items": {
-      "group_id": {
-        "description": "群号",
-        "type": "string",
-        "hint": "如：123456789"
-      }
-    },
-    "default": []
+    "description": "推送通知的群号列表（每行一个）",
+    "type": "text",
+    "hint": "每行一个群号，如：123456789",
+    "default": ""
   },
   "poll_interval": {
     "description": "轮询间隔（分钟）",

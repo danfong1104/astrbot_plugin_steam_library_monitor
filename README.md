@@ -40,22 +40,19 @@
 
 ### 配置示例
 
-```json
-{
-  "steam_api_key": "你的Steam API Key",
-  "sgdb_api_key": "你的SGDB API Key",
-  "steam_ids": [
-    {"steam_id": "76561198203485468", "nickname": "小明"},
-    {"steam_id": "76561198012345678", "nickname": ""}
-  ],
-  "notify_groups": [
-    {"group_id": "123456789"},
-    {"group_id": "987654321"}
-  ],
-  "poll_interval": 30,
-  "enable_notification": true,
-  "render_image": true
-}
+**steam_ids**（文本框，每行一个）：
+```
+76561198203485468:小明
+76561198012345678:小红
+76561198098765432
+```
+
+格式：`Steam ID:昵称`（昵称可选，用英文冒号分隔）
+
+**notify_groups**（文本框，每行一个群号）：
+```
+123456789
+987654321
 ```
 
 ### 获取API Key
