@@ -395,8 +395,12 @@ class SteamLibraryMonitor(Star):
         for idx, line in enumerate(game_name_lines):
             draw.text((text_x, text_y + 72 + idx * 30), line, font=font, fill=(129, 173, 81, 255))
 
-        # 转换为RGB并返回
-        return img.convert("RGB")
+        # 转换为RGB并返回字节
+        rgb_img = img.convert("RGB")
+        buf = io.BytesIO()
+        rgb_img.save(buf, format="PNG")
+        buf.seek(0)
+        return buf.getvalue()
 
     def _text_wrap(self, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
         """自动换行。"""
@@ -674,8 +678,12 @@ class SteamLibraryMonitor(Star):
         for idx, line in enumerate(game_name_lines):
             draw.text((text_x, text_y + 72 + idx * 30), line, font=font, fill=(129, 173, 81, 255))
 
-        # 转换为RGB并返回
-        return img.convert("RGB")
+        # 转换为RGB并返回字节
+        rgb_img = img.convert("RGB")
+        buf = io.BytesIO()
+        rgb_img.save(buf, format="PNG")
+        buf.seek(0)
+        return buf.getvalue()
 
     @steamlib.command("list", alias={"sl列表", "sllist"})
     async def list_friends(self, event: AstrMessageEvent):
