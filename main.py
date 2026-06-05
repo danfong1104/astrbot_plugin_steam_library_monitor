@@ -2,6 +2,8 @@ import asyncio
 import io
 import json
 import os
+import random
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -52,6 +54,9 @@ class SteamLibraryMonitor(Star):
 
         # 字体路径
         self.fonts_dir: Path = Path(__file__).parent / "fonts"
+
+        # 记录最后检查时间
+        self.last_check_time: Optional[datetime] = None
 
         # 启动轮询
         self._start_polling()
@@ -115,24 +120,59 @@ class SteamLibraryMonitor(Star):
 
     def _start_polling(self):
         """启动轮询任务。"""
+        logger.info("=" * 50)
+        logger.info("[Steam游戏库监控] 插件启动中...")
+
         if not self.steam_api_key:
-            logger.warning("Steam API Key 未配置，轮询任务未启动")
+            logger.warning("[Steam游戏库监控] Steam API Key 未配置，轮询任务未启动")
             return
 
         if not self.steam_ids_config:
-            logger.warning("未配置监控的Steam ID，轮询任务未启动")
+            logger.warning("[Steam游戏库监控] 未配置监控的Steam ID，轮询任务未启动")
             return
 
+        # 输出监控配置信息
+        logger.info(f"[Steam游戏库监控] 监控用户列表 ({len(self.steam_ids_config)} 人):")
+        for i, friend in enumerate(self.steam_ids_config, 1):
+            steam_id = friend.get("steam_id", "")
+            nickname = friend.get("nickname", "") or "未设置昵称"
+            logger.info(f"  {i}. {nickname} (ID: {steam_id})")
+
+        logger.info(f"[Steam游戏库监控] 推送群号列表 ({len(self.notify_groups)} 个):")
+        if self.notify_groups:
+            for group_id in self.notify_groups:
+                logger.info(f"  - 群 {group_id}")
+        else:
+            logger.info("  - 未配置推送群号")
+
+        # 计算下次轮询时间
+        next_check = datetime.now()
+        logger.info(f"[Steam游戏库监控] 轮询间隔: {self.poll_interval} 分钟")
+        logger.info(f"[Steam游戏库监控] 图片渲染: {'启用' if self.render_image else '禁用'}")
+        logger.info(f"[Steam游戏库监控] 通知推送: {'启用' if self.enable_notification else '禁用'}")
+        logger.info("=" * 50)
+
         self._poll_task = asyncio.create_task(self._poll_loop())
-        logger.info(f"Steam游戏库轮询已启动，间隔 {self.poll_interval} 分钟，监控 {len(self.steam_ids_config)} 个好友")
+        logger.info("[Steam游戏库监控] 轮询任务已启动")
 
     async def _poll_loop(self):
         """轮询循环。"""
         while True:
+            now = datetime.now()
+            logger.info(f"[Steam游戏库监控] 开始轮询检查 - {now.strftime('%Y-%m-%d %H:%M:%S')}")
+
             try:
                 await self._check_all_friends()
+                self.last_check_time = now
+                logger.info(f"[Steam游戏库监控] 轮询检查完成")
             except Exception as e:
-                logger.error(f"轮询检查失败: {e}")
+                logger.error(f"[Steam游戏库监控] 轮询检查失败: {e}")
+
+            # 计算下次轮询时间
+            next_time = datetime.now().timestamp() + self.poll_interval * 60
+            next_check_str = datetime.fromtimestamp(next_time).strftime('%Y-%m-%d %H:%M:%S')
+            logger.info(f"[Steam游戏库监控] 下次轮询时间: {next_check_str}")
+
             await asyncio.sleep(self.poll_interval * 60)
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -410,7 +450,10 @@ class SteamLibraryMonitor(Star):
     async def _check_all_friends(self):
         """检查所有好友的游戏库变化。"""
         if not self.steam_ids_config:
+            logger.info("[Steam游戏库监控] 无监控用户，跳过检查")
             return
+
+        logger.info(f"[Steam游戏库监控] 正在检查 {len(self.steam_ids_config)} 个用户...")
 
         for friend_config in self.steam_ids_config:
             steam_id = friend_config.get("steam_id", "")
@@ -497,6 +540,142 @@ class SteamLibraryMonitor(Star):
     def steamlib(self):
         """Steam游戏库监控命令组。"""
         pass
+
+    @steamlib.command("test", alias={"sl测试", "sltest"})
+    async def test_notify(self, event: AstrMessageEvent):
+        """测试推送效果。"""
+        if not self.steam_api_key:
+            yield event.plain_result("❌ 请先在插件配置中设置 Steam Web API Key")
+            return
+
+        if not self.steam_ids_config:
+            yield event.plain_result("📋 未配置监控的Steam ID")
+            return
+
+        yield event.plain_result("🎮 正在准备测试推送...")
+
+        # 随机选择一个用户
+        friend_config = random.choice(self.steam_ids_config)
+        steam_id = friend_config.get("steam_id", "")
+        nickname = friend_config.get("nickname", "")
+
+        if not nickname:
+            player_info = await self._get_player_summary(steam_id)
+            nickname = player_info.get("personaname", steam_id) if player_info else steam_id
+
+        # 获取用户的最后购买游戏（从缓存中随机选一个）
+        cached_games = self.games_cache.get(steam_id, [])
+        if not cached_games:
+            yield event.plain_result(f"❌ {nickname} 的游戏库缓存为空，请先运行 /steamlib check 初始化")
+            return
+
+        # 获取游戏信息
+        games = await self._get_owned_games(steam_id)
+        if not games:
+            yield event.plain_result(f"❌ 无法获取 {nickname} 的游戏列表")
+            return
+
+        # 随机选择一个游戏
+        game = random.choice(games)
+        game_name = game.get("name", "未知游戏")
+        appid = game.get("appid", 0)
+
+        if self.render_image:
+            try:
+                # 获取玩家头像
+                player_info = await self._get_player_summary(steam_id)
+                avatar_url = player_info.get("avatarfull", "") if player_info else ""
+                avatar_path = await self._get_avatar(steam_id, avatar_url) if avatar_url else None
+
+                # 获取游戏封面
+                cover_path = await self._get_game_cover(appid, game_name)
+
+                # 渲染图片（使用测试标题）
+                image_data = await self._render_test_image(
+                    nickname, avatar_path, game_name, cover_path
+                )
+
+                # 保存临时图片
+                temp_path = self.data_dir / "temp_test.png"
+                with open(temp_path, "wb") as f:
+                    f.write(image_data)
+
+                # 发送到当前会话
+                yield event.plain_result(f"🎮 测试推送 - 随机用户: {nickname}\n游戏: {game_name}")
+                yield event.image_result(str(temp_path))
+
+            except Exception as e:
+                logger.error(f"测试推送渲染失败: {e}")
+                yield event.plain_result(f"🎮 测试推送（文本模式）\n\n👤 用户: {nickname}\n🎮 游戏: {game_name}\n📝 状态: 测试效果")
+        else:
+            yield event.plain_result(f"🎮 测试推送\n\n👤 用户: {nickname}\n🎮 游戏: {game_name}\n📝 状态: 测试效果")
+
+    async def _render_test_image(
+        self,
+        player_name: str,
+        avatar_path: Optional[Path],
+        game_name: str,
+        cover_path: Optional[Path],
+    ) -> bytes:
+        """渲染测试通知图片。"""
+        # 创建渐变背景
+        img = self._render_gradient_bg(IMG_W, IMG_H).convert("RGBA")
+        draw = ImageDraw.Draw(img)
+
+        # 获取字体
+        font_bold = self._get_font(28, bold=True)
+        font = self._get_font(22)
+        font_small = self._get_font(16)
+
+        # 1. 渲染封面图（左侧）
+        cover_right = 0
+        if cover_path and cover_path.exists():
+            try:
+                cover_src = Image.open(cover_path).convert("RGBA")
+                scale = IMG_H / cover_src.height
+                new_w = int(cover_src.width * scale)
+                cover_resized = cover_src.resize((new_w, IMG_H), Image.LANCZOS)
+                img.paste(cover_resized, (0, 0), cover_resized)
+                cover_right = new_w
+            except Exception as e:
+                logger.error(f"封面渲染失败: {e}")
+
+        # 2. 渲染头像（封面右侧）
+        avatar_margin = 24
+        avatar_x = cover_right + avatar_margin
+        avatar_y = 30
+
+        if avatar_path and avatar_path.exists():
+            try:
+                avatar = Image.open(avatar_path).convert("RGBA").resize((AVATAR_SIZE, AVATAR_SIZE))
+                # 圆角遮罩
+                mask = Image.new("L", (AVATAR_SIZE, AVATAR_SIZE), 0)
+                draw_mask = ImageDraw.Draw(mask)
+                draw_mask.rounded_rectangle((0, 0, AVATAR_SIZE, AVATAR_SIZE), radius=AVATAR_SIZE // 5, fill=255)
+                avatar_rgba = avatar.copy()
+                avatar_rgba.putalpha(mask)
+                img.alpha_composite(avatar_rgba, (avatar_x, avatar_y))
+            except Exception as e:
+                logger.error(f"头像渲染失败: {e}")
+
+        # 3. 渲染文字（头像右侧）
+        text_x = avatar_x + AVATAR_SIZE + avatar_margin
+        text_y = avatar_y + 10
+
+        # 玩家名
+        draw.text((text_x, text_y), player_name, font=font_bold, fill=(255, 255, 255, 255))
+
+        # "测试效果"（替代"购买了新游戏"）
+        draw.text((text_x, text_y + 36), "测试效果", font=font, fill=(255, 200, 100, 255))
+
+        # 游戏名（可能需要换行）
+        text_area_w = IMG_W - text_x - 20
+        game_name_lines = self._text_wrap(game_name, font, text_area_w)
+        for idx, line in enumerate(game_name_lines):
+            draw.text((text_x, text_y + 72 + idx * 30), line, font=font, fill=(129, 173, 81, 255))
+
+        # 转换为RGB并返回
+        return img.convert("RGB")
 
     @steamlib.command("list", alias={"sl列表", "sllist"})
     async def list_friends(self, event: AstrMessageEvent):
@@ -597,6 +776,7 @@ class SteamLibraryMonitor(Star):
         help_text = """🎮 Steam游戏库监控插件
 
 📌 命令列表:
+  /steamlib test - 测试推送效果（随机用户+游戏）
   /steamlib list - 查看监控列表
   /steamlib check - 立即检查游戏库变动
   /steamlib info <steam_id> - 查看好友详细信息
