@@ -31,10 +31,22 @@
     "default": "恭喜 {username} 新入库了 {gamename}"
   },
   "show_game_info": {
-    "description": "显示游戏资讯（价格等）",
+    "description": "显示游戏资讯（价格、链接等）",
     "type": "bool",
-    "hint": "开启后会在通知中显示游戏价格信息",
+    "hint": "开启后会在通知中显示游戏价格和商店链接",
     "default": true
+  },
+  "comment_at_lowest": {
+    "description": "史低时的购买评价",
+    "type": "string",
+    "hint": "当购买价格等于史低时显示",
+    "default": "绝佳的买入时机，薅羊毛小能手！"
+  },
+  "comment_above_lowest": {
+    "description": "高于史低时的购买评价",
+    "type": "string",
+    "hint": "当购买价格高于史低时显示",
+    "default": "有点冤大头了呢！为什么不再等等。"
   },
   "poll_interval": {
     "description": "轮询间隔（分钟）",

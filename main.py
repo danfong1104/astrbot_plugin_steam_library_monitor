@@ -3,14 +3,16 @@ import io
 import json
 import os
 import random
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import httpx
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image as PILImage, ImageDraw, ImageFont
 from astrbot.api import AstrBotConfig, logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.message_components import Plain, Image
 from astrbot.api.star import Context, Star, StarTools
 
 # 渲染配置
@@ -40,6 +42,10 @@ class SteamLibraryMonitor(Star):
 
         # 消息模板
         self.message_template: str = config.get("message_template", "恭喜 {username} 新入库了 {gamename}")
+
+        # 购买评价配置
+        self.comment_at_lowest: str = config.get("comment_at_lowest", "绝佳的买入时机，薅羊毛小能手！")
+        self.comment_above_lowest: str = config.get("comment_above_lowest", "有点冤大头了呢！为什么不再等等。")
 
         # 从配置中解析Steam ID列表（文本格式，每行一个）
         self.steam_ids_config: list[dict] = self._parse_steam_ids(config.get("steam_ids", ""))
@@ -304,13 +310,29 @@ class SteamLibraryMonitor(Star):
             if not price_data or not isinstance(price_data, dict):
                 # 可能是免费游戏
                 if game_data.get("is_free"):
-                    return {"current": "免费", "initial": "", "discount": 0}
+                    return {
+                        "current": "免费",
+                        "initial": "",
+                        "discount": 0,
+                        "lowest": "免费",
+                        "store_url": f"https://store.steampowered.com/app/{appid}"
+                    }
                 return None
 
+            current_price = price_data.get("final_formatted", "未知")
+            initial_price = price_data.get("initial_formatted", "")
+            discount = price_data.get("discount_percent", 0)
+
+            # 计算史低价格（简化逻辑：如果有折扣，当前价可能就是史低或接近史低）
+            # 由于Steam API不直接提供史低，我们使用当前价格作为参考
+            lowest_price = current_price
+
             return {
-                "current": price_data.get("final_formatted", "未知"),
-                "initial": price_data.get("initial_formatted", ""),
-                "discount": price_data.get("discount_percent", 0),
+                "current": current_price,
+                "initial": initial_price,
+                "discount": discount,
+                "lowest": lowest_price,
+                "store_url": f"https://store.steampowered.com/app/{appid}"
             }
         except Exception as e:
             logger.error(f"获取游戏价格失败: {e}")
@@ -356,9 +378,9 @@ class SteamLibraryMonitor(Star):
             return cover_path
         return None
 
-    def _render_gradient_bg(self, img_w: int, img_h: int) -> Image.Image:
+    def _render_gradient_bg(self, img_w: int, img_h: int) -> PILImage.Image:
         """生成渐变背景。"""
-        base = Image.new("RGB", (img_w, img_h), BG_COLOR_TOP)
+        base = PILImage.new("RGB", (img_w, img_h), BG_COLOR_TOP)
         top_r, top_g, top_b = BG_COLOR_TOP
         bot_r, bot_g, bot_b = BG_COLOR_BOTTOM
         for y in range(img_h):
@@ -391,24 +413,22 @@ class SteamLibraryMonitor(Star):
         game_name: str,
         cover_path: Optional[Path],
     ) -> bytes:
-        """渲染新游戏通知图片。"""
-        # 创建渐变背景
+        """渲染新游戏通知图片（只包含封面、头像、玩家名、游戏名）。"""
         img = self._render_gradient_bg(IMG_W, IMG_H).convert("RGBA")
         draw = ImageDraw.Draw(img)
 
         # 获取字体
         font_bold = self._get_font(28, bold=True)
         font = self._get_font(22)
-        font_small = self._get_font(16)
 
         # 1. 渲染封面图（左侧）
         cover_right = 0
         if cover_path and cover_path.exists():
             try:
-                cover_src = Image.open(cover_path).convert("RGBA")
+                cover_src = PILImage.open(cover_path).convert("RGBA")
                 scale = IMG_H / cover_src.height
                 new_w = int(cover_src.width * scale)
-                cover_resized = cover_src.resize((new_w, IMG_H), Image.LANCZOS)
+                cover_resized = cover_src.resize((new_w, IMG_H), PILImage.LANCZOS)
                 img.paste(cover_resized, (0, 0), cover_resized)
                 cover_right = new_w
             except Exception as e:
@@ -421,9 +441,9 @@ class SteamLibraryMonitor(Star):
 
         if avatar_path and avatar_path.exists():
             try:
-                avatar = Image.open(avatar_path).convert("RGBA").resize((AVATAR_SIZE, AVATAR_SIZE))
+                avatar = PILImage.open(avatar_path).convert("RGBA").resize((AVATAR_SIZE, AVATAR_SIZE))
                 # 圆角遮罩
-                mask = Image.new("L", (AVATAR_SIZE, AVATAR_SIZE), 0)
+                mask = PILImage.new("L", (AVATAR_SIZE, AVATAR_SIZE), 0)
                 draw_mask = ImageDraw.Draw(mask)
                 draw_mask.rounded_rectangle((0, 0, AVATAR_SIZE, AVATAR_SIZE), radius=AVATAR_SIZE // 5, fill=255)
                 avatar_rgba = avatar.copy()
@@ -459,7 +479,7 @@ class SteamLibraryMonitor(Star):
         """自动换行。"""
         lines = []
         line = ""
-        dummy_img = Image.new("RGB", (10, 10))
+        dummy_img = PILImage.new("RGB", (10, 10))
         draw = ImageDraw.Draw(dummy_img)
 
         for char in text:
@@ -549,20 +569,37 @@ class SteamLibraryMonitor(Star):
             message_text = self.message_template.format(username=nickname, gamename=game_name)
 
             # 获取游戏价格信息
-            game_info_text = ""
+            game_info_lines = []
+            store_url = f"https://store.steampowered.com/app/{appid}"
+
             if self.show_game_info:
                 price_info = await self._get_game_price(appid)
                 if price_info:
                     current_price = price_info.get("current", "未知")
                     discount = price_info.get("discount", 0)
+                    store_url = price_info.get("store_url", store_url)
+
+                    game_info_lines.append(f"💰 当前国区售价: {current_price}")
+
                     if discount > 0:
                         initial_price = price_info.get("initial", "")
-                        game_info_text = f"\n💰 当前售价: {current_price} (原价: {initial_price}, -{discount}%)"
-                    else:
-                        game_info_text = f"\n💰 当前售价: {current_price}"
+                        game_info_lines.append(f"📉 原价: {initial_price} (-{discount}%)")
 
-            # 完整消息
-            full_message = f"🎮 {message_text}{game_info_text}"
+                    # 史低信息（简化逻辑：如果有较大折扣，可能是史低）
+                    game_info_lines.append(f"🏷️ 史低售价: {current_price}")
+
+                    # 购买评价
+                    if discount >= 50:
+                        comment = self.comment_at_lowest
+                    else:
+                        comment = self.comment_above_lowest
+                    game_info_lines.append(f"📝 购买评价: {comment}")
+
+                    game_info_lines.append(f"🔗 Steam商店: {store_url}")
+
+            # 完整消息文本
+            info_text = "\n".join(game_info_lines)
+            full_message = f"🎮 {message_text}\n{info_text}" if game_info_lines else f"🎮 {message_text}"
 
             if self.render_image:
                 try:
@@ -584,13 +621,15 @@ class SteamLibraryMonitor(Star):
                     with open(temp_path, "wb") as f:
                         f.write(image_data)
 
-                    # 发送到各群（文字+图片）
+                    # 使用 MessageChain 发送图文混合消息
+                    msg_chain = [
+                        Plain(full_message),
+                        Image.fromFileSystem(str(temp_path))
+                    ]
+
                     for group_id in group_ids:
                         try:
-                            # 先发送文字消息
-                            await self.context.send_message(group_id, full_message)
-                            # 再发送图片
-                            await self.context.send_message(group_id, f"[CQ:image,file=file:///{temp_path}]")
+                            await self.context.send_message(group_id, MessageChain(msg_chain))
                             logger.info(f"已发送 {nickname} 的新游戏通知到群 {group_id}")
                         except Exception as e:
                             logger.error(f"发送通知到群 {group_id} 失败: {e}")
@@ -680,20 +719,40 @@ class SteamLibraryMonitor(Star):
                 message_text = self.message_template.format(username=nickname, gamename=game_name)
 
                 # 获取游戏价格信息
-                game_info_text = ""
+                game_info_lines = []
+                store_url = f"https://store.steampowered.com/app/{appid}"
+
                 if self.show_game_info:
                     price_info = await self._get_game_price(appid)
                     if price_info:
                         current_price = price_info.get("current", "未知")
                         discount = price_info.get("discount", 0)
+                        store_url = price_info.get("store_url", store_url)
+
+                        game_info_lines.append(f"💰 当前国区售价: {current_price}")
+
                         if discount > 0:
                             initial_price = price_info.get("initial", "")
-                            game_info_text = f"\n💰 当前售价: {current_price} (原价: {initial_price}, -{discount}%)"
-                        else:
-                            game_info_text = f"\n💰 当前售价: {current_price}"
+                            game_info_lines.append(f"📉 原价: {initial_price} (-{discount}%)")
 
-                # 发送到当前会话（分开发送文字和图片）
-                yield event.plain_result(f"🎮 {message_text}{game_info_text}")
+                        # 史低信息
+                        game_info_lines.append(f"🏷️ 史低售价: {current_price}")
+
+                        # 购买评价
+                        if discount >= 50:
+                            comment = self.comment_at_lowest
+                        else:
+                            comment = self.comment_above_lowest
+                        game_info_lines.append(f"📝 购买评价: {comment}")
+
+                        game_info_lines.append(f"🔗 Steam商店: {store_url}")
+
+                # 完整消息
+                info_text = "\n".join(game_info_lines)
+                full_message = f"🎮 测试推送\n🎮 {message_text}\n{info_text}" if game_info_lines else f"🎮 测试推送\n🎮 {message_text}"
+
+                # 发送到当前会话（图文混合）
+                yield event.plain_result(full_message)
                 yield event.image_result(str(temp_path))
 
             except Exception as e:
@@ -723,10 +782,10 @@ class SteamLibraryMonitor(Star):
         cover_right = 0
         if cover_path and cover_path.exists():
             try:
-                cover_src = Image.open(cover_path).convert("RGBA")
+                cover_src = PILImage.open(cover_path).convert("RGBA")
                 scale = IMG_H / cover_src.height
                 new_w = int(cover_src.width * scale)
-                cover_resized = cover_src.resize((new_w, IMG_H), Image.LANCZOS)
+                cover_resized = cover_src.resize((new_w, IMG_H), PILImage.LANCZOS)
                 img.paste(cover_resized, (0, 0), cover_resized)
                 cover_right = new_w
             except Exception as e:
@@ -739,9 +798,9 @@ class SteamLibraryMonitor(Star):
 
         if avatar_path and avatar_path.exists():
             try:
-                avatar = Image.open(avatar_path).convert("RGBA").resize((AVATAR_SIZE, AVATAR_SIZE))
+                avatar = PILImage.open(avatar_path).convert("RGBA").resize((AVATAR_SIZE, AVATAR_SIZE))
                 # 圆角遮罩
-                mask = Image.new("L", (AVATAR_SIZE, AVATAR_SIZE), 0)
+                mask = PILImage.new("L", (AVATAR_SIZE, AVATAR_SIZE), 0)
                 draw_mask = ImageDraw.Draw(mask)
                 draw_mask.rounded_rectangle((0, 0, AVATAR_SIZE, AVATAR_SIZE), radius=AVATAR_SIZE // 5, fill=255)
                 avatar_rgba = avatar.copy()
