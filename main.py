@@ -36,6 +36,10 @@ class SteamLibraryMonitor(Star):
         self.poll_interval: int = config.get("poll_interval", 30)
         self.enable_notification: bool = config.get("enable_notification", True)
         self.render_image: bool = config.get("render_image", True)
+        self.show_game_info: bool = config.get("show_game_info", True)
+
+        # 消息模板
+        self.message_template: str = config.get("message_template", "恭喜 {username} 新入库了 {gamename}")
 
         # 从配置中解析Steam ID列表（文本格式，每行一个）
         self.steam_ids_config: list[dict] = self._parse_steam_ids(config.get("steam_ids", ""))
@@ -261,6 +265,32 @@ class SteamLibraryMonitor(Star):
 
         except Exception as e:
             logger.error(f"获取SGDB封面失败: {e}")
+            return None
+
+    async def _get_game_price(self, appid: int) -> Optional[dict]:
+        """获取游戏价格信息（国区）。"""
+        client = await self._get_client()
+
+        try:
+            url = f"https://store.steampowered.com/api/appdetails?appids={appid}&cc=cn&filters=price_overview"
+            resp = await client.get(url, timeout=10)
+            data = resp.json()
+
+            app_data = data.get(str(appid), {})
+            if not app_data.get("success"):
+                return None
+
+            price_data = app_data.get("data", {}).get("price_overview", {})
+            if not price_data:
+                return None
+
+            return {
+                "current": price_data.get("final_formatted", "未知"),
+                "initial": price_data.get("initial_formatted", ""),
+                "discount": price_data.get("discount_percent", 0),
+            }
+        except Exception as e:
+            logger.error(f"获取游戏价格失败: {e}")
             return None
 
     async def _download_image(self, url: str, save_path: Path) -> bool:
@@ -492,8 +522,26 @@ class SteamLibraryMonitor(Star):
             game_name = game.get("name", "未知游戏")
             appid = game.get("appid", 0)
 
+            # 构建消息文本
+            message_text = self.message_template.format(username=nickname, gamename=game_name)
+
+            # 获取游戏价格信息
+            game_info_text = ""
+            if self.show_game_info:
+                price_info = await self._get_game_price(appid)
+                if price_info:
+                    current_price = price_info.get("current", "未知")
+                    discount = price_info.get("discount", 0)
+                    if discount > 0:
+                        initial_price = price_info.get("initial", "")
+                        game_info_text = f"\n💰 当前售价: {current_price} (原价: {initial_price}, -{discount}%)"
+                    else:
+                        game_info_text = f"\n💰 当前售价: {current_price}"
+
+            # 完整消息
+            full_message = f"🎮 {message_text}{game_info_text}"
+
             if self.render_image:
-                # 渲染图片通知
                 try:
                     # 获取玩家信息
                     player_info = await self._get_player_summary(steam_id)
@@ -513,30 +561,32 @@ class SteamLibraryMonitor(Star):
                     with open(temp_path, "wb") as f:
                         f.write(image_data)
 
-                    # 发送到各群
+                    # 发送到各群（文字+图片合并）
                     for group_id in group_ids:
                         try:
-                            await self.context.send_message(group_id, f"[CQ:image,file=file:///{temp_path}]")
-                            logger.info(f"已发送 {nickname} 的新游戏通知图片到群 {group_id}")
+                            # 发送合并消息：文字 + 图片
+                            await self.context.send_message(
+                                group_id,
+                                f"{full_message}\n[CQ:image,file=file:///{temp_path}]"
+                            )
+                            logger.info(f"已发送 {nickname} 的新游戏通知到群 {group_id}")
                         except Exception as e:
-                            logger.error(f"发送图片通知到群 {group_id} 失败: {e}")
+                            logger.error(f"发送通知到群 {group_id} 失败: {e}")
 
                 except Exception as e:
                     logger.error(f"渲染图片失败: {e}")
-                    # 降级为文本通知
-                    await self._send_text_notify(nickname, game_name, group_ids)
+                    # 降级为纯文本通知
+                    await self._send_text_notify(full_message, group_ids)
             else:
-                # 文本通知
-                await self._send_text_notify(nickname, game_name, group_ids)
+                # 纯文本通知
+                await self._send_text_notify(full_message, group_ids)
 
-    async def _send_text_notify(self, nickname: str, game_name: str, group_ids: list[str]):
+    async def _send_text_notify(self, message: str, group_ids: list[str]):
         """发送文本通知。"""
-        message = f"🎮 Steam好友游戏库更新\n\n👤 {nickname} 购买了新游戏：\n  - {game_name}"
-
         for group_id in group_ids:
             try:
                 await self.context.send_message(group_id, message)
-                logger.info(f"已发送 {nickname} 的新游戏文本通知到群 {group_id}")
+                logger.info(f"已发送文本通知到群 {group_id}")
             except Exception as e:
                 logger.error(f"发送文本通知到群 {group_id} 失败: {e}")
 
@@ -604,15 +654,30 @@ class SteamLibraryMonitor(Star):
                 with open(temp_path, "wb") as f:
                     f.write(image_data)
 
-                # 发送到当前会话
-                yield event.plain_result(f"🎮 测试推送 - 随机用户: {nickname}\n游戏: {game_name}")
-                yield event.image_result(str(temp_path))
+                # 构建消息
+                message_text = self.message_template.format(username=nickname, gamename=game_name)
+
+                # 获取游戏价格信息
+                game_info_text = ""
+                if self.show_game_info:
+                    price_info = await self._get_game_price(appid)
+                    if price_info:
+                        current_price = price_info.get("current", "未知")
+                        discount = price_info.get("discount", 0)
+                        if discount > 0:
+                            initial_price = price_info.get("initial", "")
+                            game_info_text = f"\n💰 当前售价: {current_price} (原价: {initial_price}, -{discount}%)"
+                        else:
+                            game_info_text = f"\n💰 当前售价: {current_price}"
+
+                # 发送到当前会话（合并文字和图片）
+                yield event.plain_result(f"🎮 {message_text}{game_info_text}\n[CQ:image,file=file:///{temp_path}]")
 
             except Exception as e:
                 logger.error(f"测试推送渲染失败: {e}")
-                yield event.plain_result(f"🎮 测试推送（文本模式）\n\n👤 用户: {nickname}\n🎮 游戏: {game_name}\n📝 状态: 测试效果")
+                yield event.plain_result(f"🎮 测试推送（文本模式）\n\n{self.message_template.format(username=nickname, gamename=game_name)}\n📝 测试效果")
         else:
-            yield event.plain_result(f"🎮 测试推送\n\n👤 用户: {nickname}\n🎮 游戏: {game_name}\n📝 状态: 测试效果")
+            yield event.plain_result(f"🎮 测试推送\n\n{self.message_template.format(username=nickname, gamename=game_name)}\n📝 测试效果")
 
     async def _render_test_image(
         self,
@@ -796,6 +861,8 @@ class SteamLibraryMonitor(Star):
   - SteamGridDB API Key（可选，用于获取游戏封面）
   - 要监控的Steam ID列表
   - 推送通知的群号列表
+  - 消息模板（支持变量：{username} {gamename}）
+  - 是否显示游戏资讯（价格等）
 
 🔗 获取Steam Web API Key:
 https://steamcommunity.com/dev/apikey

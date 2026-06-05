@@ -21,8 +21,20 @@
   "notify_groups": {
     "description": "推送通知的群号列表（每行一个）",
     "type": "text",
-    "hint": "每行一个群号，如：123456789",
+    "hint": "新游戏购买通知将发送到这些群",
     "default": ""
+  },
+  "message_template": {
+    "description": "通知消息模板",
+    "type": "text",
+    "hint": "可用变量：{username} 用户名，{gamename} 游戏名",
+    "default": "恭喜 {username} 新入库了 {gamename}"
+  },
+  "show_game_info": {
+    "description": "显示游戏资讯（价格等）",
+    "type": "bool",
+    "hint": "开启后会在通知中显示游戏价格信息",
+    "default": true
   },
   "poll_interval": {
     "description": "轮询间隔（分钟）",
