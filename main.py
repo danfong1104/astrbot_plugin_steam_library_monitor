@@ -272,16 +272,39 @@ class SteamLibraryMonitor(Star):
         client = await self._get_client()
 
         try:
-            url = f"https://store.steampowered.com/api/appdetails?appids={appid}&cc=cn&filters=price_overview"
+            # 不使用filters参数，获取完整数据
+            url = f"https://store.steampowered.com/api/appdetails?appids={appid}&cc=cn"
             resp = await client.get(url, timeout=10)
-            data = resp.json()
 
-            app_data = data.get(str(appid), {})
-            if not app_data.get("success"):
+            if resp.status_code != 200:
+                logger.warning(f"Steam API返回状态码: {resp.status_code}")
                 return None
 
-            price_data = app_data.get("data", {}).get("price_overview", {})
-            if not price_data:
+            data = resp.json()
+
+            # 检查返回数据格式
+            if not isinstance(data, dict):
+                logger.warning(f"Steam API返回非字典数据: {type(data)}")
+                return None
+
+            app_data = data.get(str(appid))
+            if not app_data or not isinstance(app_data, dict):
+                logger.warning(f"未找到appid {appid} 的数据")
+                return None
+
+            if not app_data.get("success"):
+                logger.warning(f"Steam API请求失败: {appid}")
+                return None
+
+            game_data = app_data.get("data", {})
+            if not isinstance(game_data, dict):
+                return None
+
+            price_data = game_data.get("price_overview")
+            if not price_data or not isinstance(price_data, dict):
+                # 可能是免费游戏
+                if game_data.get("is_free"):
+                    return {"current": "免费", "initial": "", "discount": 0}
                 return None
 
             return {
@@ -561,14 +584,13 @@ class SteamLibraryMonitor(Star):
                     with open(temp_path, "wb") as f:
                         f.write(image_data)
 
-                    # 发送到各群（文字+图片合并）
+                    # 发送到各群（文字+图片）
                     for group_id in group_ids:
                         try:
-                            # 发送合并消息：文字 + 图片
-                            await self.context.send_message(
-                                group_id,
-                                f"{full_message}\n[CQ:image,file=file:///{temp_path}]"
-                            )
+                            # 先发送文字消息
+                            await self.context.send_message(group_id, full_message)
+                            # 再发送图片
+                            await self.context.send_message(group_id, f"[CQ:image,file=file:///{temp_path}]")
                             logger.info(f"已发送 {nickname} 的新游戏通知到群 {group_id}")
                         except Exception as e:
                             logger.error(f"发送通知到群 {group_id} 失败: {e}")
@@ -670,8 +692,9 @@ class SteamLibraryMonitor(Star):
                         else:
                             game_info_text = f"\n💰 当前售价: {current_price}"
 
-                # 发送到当前会话（合并文字和图片）
-                yield event.plain_result(f"🎮 {message_text}{game_info_text}\n[CQ:image,file=file:///{temp_path}]")
+                # 发送到当前会话（分开发送文字和图片）
+                yield event.plain_result(f"🎮 {message_text}{game_info_text}")
+                yield event.image_result(str(temp_path))
 
             except Exception as e:
                 logger.error(f"测试推送渲染失败: {e}")
