@@ -3,7 +3,7 @@ display_name: Steam游戏库监控
 author: WorkBuddy
 version: 1.0.0
 desc: 监控Steam好友游戏库变动，实时通知新购买的游戏
-repo: https://github.com/workbuddy/astrbot_plugin_steam_library_monitor
+repo: https://github.com/danfong1104/astrbot_plugin_steam_library_monitor
 astrbot_version: ">=4.16,<5"
 support_platforms:
   - aiocqhttp
