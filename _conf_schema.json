@@ -6,6 +6,13 @@
     "default": "",
     "obvious_hint": true
   },
+  "itad_api_key": {
+    "description": "ITAD API Key（用于获取游戏价格和史低）",
+    "type": "string",
+    "hint": "从 https://isthereanydeal.com/apps/ 获取",
+    "default": "",
+    "obvious_hint": true
+  },
   "sgdb_api_key": {
     "description": "SteamGridDB API Key（可选，用于获取游戏封面）",
     "type": "string",
@@ -37,9 +44,9 @@
     "default": true
   },
   "comment_at_lowest": {
-    "description": "史低时的购买评价",
+    "description": "史低或低于史低时的购买评价",
     "type": "string",
-    "hint": "当购买价格等于史低时显示",
+    "hint": "当购买价格小于等于史低时显示",
     "default": "绝佳的买入时机，薅羊毛小能手！"
   },
   "comment_above_lowest": {

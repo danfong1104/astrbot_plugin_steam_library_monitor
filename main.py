@@ -32,8 +32,9 @@ class SteamLibraryMonitor(Star):
         self.data_dir: Path = StarTools.get_data_dir()
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Steam API配置
+        # API配置
         self.steam_api_key: str = config.get("steam_api_key", "")
+        self.itad_api_key: str = config.get("itad_api_key", "")
         self.sgdb_api_key: str = config.get("sgdb_api_key", "")
         self.poll_interval: int = config.get("poll_interval", 30)
         self.enable_notification: bool = config.get("enable_notification", True)
@@ -46,6 +47,9 @@ class SteamLibraryMonitor(Star):
         # 购买评价配置
         self.comment_at_lowest: str = config.get("comment_at_lowest", "绝佳的买入时机，薅羊毛小能手！")
         self.comment_above_lowest: str = config.get("comment_above_lowest", "有点冤大头了呢！为什么不再等等。")
+
+        # ITAD API基础地址
+        self.itad_api_base: str = "https://api.isthereanydeal.com"
 
         # 从配置中解析Steam ID列表（文本格式，每行一个）
         self.steam_ids_config: list[dict] = self._parse_steam_ids(config.get("steam_ids", ""))
@@ -160,6 +164,7 @@ class SteamLibraryMonitor(Star):
         logger.info(f"[Steam游戏库监控] 轮询间隔: {self.poll_interval} 分钟")
         logger.info(f"[Steam游戏库监控] 图片渲染: {'启用' if self.render_image else '禁用'}")
         logger.info(f"[Steam游戏库监控] 通知推送: {'启用' if self.enable_notification else '禁用'}")
+        logger.info(f"[Steam游戏库监控] ITAD API: {'已配置' if self.itad_api_key else '未配置（无法获取史低价格）'}")
         logger.info("=" * 50)
 
         self._poll_task = asyncio.create_task(self._poll_loop())
@@ -273,70 +278,184 @@ class SteamLibraryMonitor(Star):
             logger.error(f"获取SGDB封面失败: {e}")
             return None
 
-    async def _get_game_price(self, appid: int) -> Optional[dict]:
-        """获取游戏价格信息（国区）。"""
+    async def _search_game_on_itad(self, game_name: str) -> Optional[str]:
+        """在ITAD上搜索游戏，返回游戏ID (gid)。"""
+        if not self.itad_api_key:
+            return None
+
+        client = await self._get_client()
+        try:
+            resp = await client.get(
+                f"{self.itad_api_base}/games/search/v1",
+                params={"key": self.itad_api_key, "title": game_name, "limit": 5},
+                timeout=10
+            )
+            if resp.status_code != 200:
+                return None
+
+            data = resp.json()
+            if not data:
+                return None
+
+            # 返回第一个匹配结果的ID
+            return data[0].get("id")
+        except Exception as e:
+            logger.error(f"ITAD搜索游戏失败: {e}")
+            return None
+
+    async def _get_game_price_from_itad(self, gid: str) -> Optional[dict]:
+        """从ITAD获取游戏价格和史低信息。"""
+        if not self.itad_api_key or not gid:
+            return None
+
+        client = await self._get_client()
+        try:
+            # 使用POST请求获取价格信息
+            resp = await client.post(
+                f"{self.itad_api_base}/games/prices/v3",
+                params={"key": self.itad_api_key, "country": "CN", "shops": 61},
+                json=[gid],
+                timeout=10
+            )
+            if resp.status_code != 200:
+                logger.warning(f"ITAD价格API返回状态码: {resp.status_code}")
+                return None
+
+            data = resp.json()
+            if not data or not isinstance(data, list) or len(data) == 0:
+                return None
+
+            game_data = data[0]
+            deals = game_data.get("deals", [])
+            history_low = game_data.get("historyLow", {})
+
+            # 获取当前价格（从deals中找steam商店的）
+            current_price = None
+            original_price = None
+            discount = 0
+
+            for deal in deals:
+                if deal.get("shop", {}).get("name", "").lower() == "steam":
+                    price_info = deal.get("price", {})
+                    regular_info = deal.get("regular", {})
+                    current_price = price_info.get("amount")
+                    original_price = regular_info.get("amount")
+                    discount = deal.get("cut", 0)
+                    break
+
+            # 获取史低价格（优先级：all > y1 > m3）
+            lowest_price = None
+            for period in ["all", "y1", "m3"]:
+                low_info = history_low.get(period)
+                if low_info and low_info.get("amount") is not None:
+                    lowest_price = low_info.get("amount")
+                    break
+
+            return {
+                "current": current_price,
+                "original": original_price,
+                "discount": discount,
+                "lowest": lowest_price,
+                "currency": "CNY"
+            }
+        except Exception as e:
+            logger.error(f"ITAD获取价格失败: {e}")
+            return None
+
+    async def _get_game_price_from_steam(self, appid: int) -> Optional[dict]:
+        """从Steam官方API获取游戏价格（备用方案）。"""
         client = await self._get_client()
 
         try:
-            # 不使用filters参数，获取完整数据
             url = f"https://store.steampowered.com/api/appdetails?appids={appid}&cc=cn"
             resp = await client.get(url, timeout=10)
 
             if resp.status_code != 200:
-                logger.warning(f"Steam API返回状态码: {resp.status_code}")
                 return None
 
             data = resp.json()
-
-            # 检查返回数据格式
             if not isinstance(data, dict):
-                logger.warning(f"Steam API返回非字典数据: {type(data)}")
                 return None
 
             app_data = data.get(str(appid))
             if not app_data or not isinstance(app_data, dict):
-                logger.warning(f"未找到appid {appid} 的数据")
                 return None
 
             if not app_data.get("success"):
-                logger.warning(f"Steam API请求失败: {appid}")
                 return None
 
             game_data = app_data.get("data", {})
             if not isinstance(game_data, dict):
                 return None
 
+            # 检查是否免费
+            if game_data.get("is_free"):
+                return {"current": 0, "original": 0, "discount": 0, "lowest": 0, "currency": "CNY"}
+
             price_data = game_data.get("price_overview")
             if not price_data or not isinstance(price_data, dict):
-                # 可能是免费游戏
-                if game_data.get("is_free"):
-                    return {
-                        "current": "免费",
-                        "initial": "",
-                        "discount": 0,
-                        "lowest": "免费",
-                        "store_url": f"https://store.steampowered.com/app/{appid}"
-                    }
                 return None
 
-            current_price = price_data.get("final_formatted", "未知")
-            initial_price = price_data.get("initial_formatted", "")
+            # 价格是以分为单位
+            current_price = price_data.get("final", 0) / 100
+            original_price = price_data.get("initial", 0) / 100
             discount = price_data.get("discount_percent", 0)
-
-            # 计算史低价格（简化逻辑：如果有折扣，当前价可能就是史低或接近史低）
-            # 由于Steam API不直接提供史低，我们使用当前价格作为参考
-            lowest_price = current_price
 
             return {
                 "current": current_price,
-                "initial": initial_price,
+                "original": original_price,
                 "discount": discount,
-                "lowest": lowest_price,
-                "store_url": f"https://store.steampowered.com/app/{appid}"
+                "lowest": None,  # Steam API不提供史低
+                "currency": price_data.get("currency", "CNY")
             }
         except Exception as e:
-            logger.error(f"获取游戏价格失败: {e}")
+            logger.error(f"Steam价格API失败: {e}")
             return None
+
+    async def _get_game_price(self, appid: int, game_name: str = "") -> Optional[dict]:
+        """获取游戏价格信息（优先使用ITAD，备用Steam）。"""
+        store_url = f"https://store.steampowered.com/app/{appid}"
+
+        # 优先使用ITAD获取价格和史低
+        if self.itad_api_key and game_name:
+            gid = await self._search_game_on_itad(game_name)
+            if gid:
+                itad_price = await self._get_game_price_from_itad(gid)
+                if itad_price and itad_price.get("current") is not None:
+                    itad_price["store_url"] = store_url
+                    # 格式化价格显示
+                    current = itad_price.get("current", 0)
+                    original = itad_price.get("original", 0)
+                    lowest = itad_price.get("lowest")
+
+                    itad_price["current_formatted"] = f"¥{current:.2f}" if current else "未知"
+                    itad_price["original_formatted"] = f"¥{original:.2f}" if original and original != current else ""
+                    itad_price["lowest_formatted"] = f"¥{lowest:.2f}" if lowest else "未知"
+                    return itad_price
+
+        # 备用：使用Steam API
+        steam_price = await self._get_game_price_from_steam(appid)
+        if steam_price:
+            steam_price["store_url"] = store_url
+            current = steam_price.get("current", 0)
+            original = steam_price.get("original", 0)
+            steam_price["current_formatted"] = f"¥{current:.2f}" if current else "免费"
+            steam_price["original_formatted"] = f"¥{original:.2f}" if original and original != current else ""
+            steam_price["lowest_formatted"] = "未知（需配置ITAD API Key）"
+            return steam_price
+
+        # 免费游戏
+        return {
+            "current": 0,
+            "original": 0,
+            "discount": 0,
+            "lowest": 0,
+            "current_formatted": "免费",
+            "original_formatted": "",
+            "lowest_formatted": "免费",
+            "store_url": store_url,
+            "currency": "CNY"
+        }
 
     async def _download_image(self, url: str, save_path: Path) -> bool:
         """下载图片并保存。"""
@@ -573,26 +692,31 @@ class SteamLibraryMonitor(Star):
             store_url = f"https://store.steampowered.com/app/{appid}"
 
             if self.show_game_info:
-                price_info = await self._get_game_price(appid)
+                price_info = await self._get_game_price(appid, game_name)
                 if price_info:
-                    current_price = price_info.get("current", "未知")
+                    current_formatted = price_info.get("current_formatted", "未知")
+                    original_formatted = price_info.get("original_formatted", "")
+                    lowest_formatted = price_info.get("lowest_formatted", "未知")
                     discount = price_info.get("discount", 0)
+                    current_price = price_info.get("current", 0)
+                    lowest_price = price_info.get("lowest")
                     store_url = price_info.get("store_url", store_url)
 
-                    game_info_lines.append(f"💰 当前国区售价: {current_price}")
+                    game_info_lines.append(f"💰 当前国区售价: {current_formatted}")
 
-                    if discount > 0:
-                        initial_price = price_info.get("initial", "")
-                        game_info_lines.append(f"📉 原价: {initial_price} (-{discount}%)")
+                    if discount > 0 and original_formatted:
+                        game_info_lines.append(f"📉 原价: {original_formatted} (-{discount}%)")
 
-                    # 史低信息（简化逻辑：如果有较大折扣，可能是史低）
-                    game_info_lines.append(f"🏷️ 史低售价: {current_price}")
+                    game_info_lines.append(f"🏷️ 史低售价: {lowest_formatted}")
 
-                    # 购买评价
-                    if discount >= 50:
-                        comment = self.comment_at_lowest
+                    # 购买评价（当前价格 vs 史低）
+                    if lowest_price is not None and current_price is not None:
+                        if current_price <= lowest_price:
+                            comment = self.comment_at_lowest
+                        else:
+                            comment = self.comment_above_lowest
                     else:
-                        comment = self.comment_above_lowest
+                        comment = "无法判断（缺少价格数据）"
                     game_info_lines.append(f"📝 购买评价: {comment}")
 
                     game_info_lines.append(f"🔗 Steam商店: {store_url}")
@@ -723,26 +847,31 @@ class SteamLibraryMonitor(Star):
                 store_url = f"https://store.steampowered.com/app/{appid}"
 
                 if self.show_game_info:
-                    price_info = await self._get_game_price(appid)
+                    price_info = await self._get_game_price(appid, game_name)
                     if price_info:
-                        current_price = price_info.get("current", "未知")
+                        current_formatted = price_info.get("current_formatted", "未知")
+                        original_formatted = price_info.get("original_formatted", "")
+                        lowest_formatted = price_info.get("lowest_formatted", "未知")
                         discount = price_info.get("discount", 0)
+                        current_price = price_info.get("current", 0)
+                        lowest_price = price_info.get("lowest")
                         store_url = price_info.get("store_url", store_url)
 
-                        game_info_lines.append(f"💰 当前国区售价: {current_price}")
+                        game_info_lines.append(f"💰 当前国区售价: {current_formatted}")
 
-                        if discount > 0:
-                            initial_price = price_info.get("initial", "")
-                            game_info_lines.append(f"📉 原价: {initial_price} (-{discount}%)")
+                        if discount > 0 and original_formatted:
+                            game_info_lines.append(f"📉 原价: {original_formatted} (-{discount}%)")
 
-                        # 史低信息
-                        game_info_lines.append(f"🏷️ 史低售价: {current_price}")
+                        game_info_lines.append(f"🏷️ 史低售价: {lowest_formatted}")
 
-                        # 购买评价
-                        if discount >= 50:
-                            comment = self.comment_at_lowest
+                        # 购买评价（当前价格 vs 史低）
+                        if lowest_price is not None and current_price is not None:
+                            if current_price <= lowest_price:
+                                comment = self.comment_at_lowest
+                            else:
+                                comment = self.comment_above_lowest
                         else:
-                            comment = self.comment_above_lowest
+                            comment = "无法判断（缺少价格数据）"
                         game_info_lines.append(f"📝 购买评价: {comment}")
 
                         game_info_lines.append(f"🔗 Steam商店: {store_url}")
