@@ -1,8 +1,8 @@
 name: astrbot_plugin_steam_library_monitor
-display_name: Steam游戏库监控
+display_name: 更好的好友Steam库监测软件
 author: danfong1104
 version: 1.0.0
-desc: 监控Steam好友游戏库变动，实时通知新购买的游戏
+desc: 监控Steam好友游戏库变动，实时通知新购买的游戏，是否买贵了，是否是冤大头。
 repo: https://github.com/danfong1104/astrbot_plugin_steam_library_monitor
 astrbot_version: ">=4.16,<5"
 support_platforms:
