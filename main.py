@@ -72,6 +72,9 @@ class SteamLibraryMonitor(Star):
         # 记录最后检查时间
         self.last_check_time: Optional[datetime] = None
 
+        # 缓存平台适配器 ID（首次使用时动态获取）
+        self._cached_adapter_id: Optional[str] = None
+
         # 启动轮询
         self._start_polling()
 
@@ -131,6 +134,39 @@ class SteamLibraryMonitor(Star):
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.error(f"保存 {path} 失败: {e}")
+
+    async def _get_adapter_id(self) -> Optional[str]:
+        """获取平台适配器 ID，优先 AIOCQHTTP（QQ），备用其他平台。"""
+        # 已缓存直接返回
+        if self._cached_adapter_id:
+            return self._cached_adapter_id
+
+        # 按优先级尝试各个平台适配器
+        for adapter_type in [
+            filter.PlatformAdapterType.AIOCQHTTP,    # QQ (NapCat/LLOneBot)
+            filter.PlatformAdapterType.QQOFFICIAL,   # QQ 官方机器人
+            filter.PlatformAdapterType.DINGTALK,     # 钉钉
+            filter.PlatformAdapterType.WECOM,        # 企业微信
+            filter.PlatformAdapterType.LARK,         # 飞书
+        ]:
+            try:
+                platform = self.context.get_platform(adapter_type)
+                if platform:
+                    meta = platform.meta()
+                    if meta and meta.id:
+                        self._cached_adapter_id = meta.id
+                        logger.info(f"[Steam游戏库监控] 检测到平台适配器: {meta.id}")
+                        return self._cached_adapter_id
+            except Exception:
+                continue
+
+        logger.error("[Steam游戏库监控] ❌ 未找到任何可用平台适配器")
+        logger.error("[Steam游戏库监控] 请确保已配置并启用至少一个消息平台（如 aiocqhttp）")
+        return None
+
+    def _build_group_umo(self, adapter_id: str, group_id: str) -> str:
+        """根据 adapter_id 和群号构建 UMO 字符串。"""
+        return f"{adapter_id}:GroupMessage:{group_id}"
 
     def _start_polling(self):
         """启动轮询任务。"""
@@ -649,6 +685,12 @@ class SteamLibraryMonitor(Star):
             logger.info("[Steam游戏库监控] 无监控用户，跳过检查")
             return
 
+        # 检查平台适配器是否就绪
+        adapter_id = await self._get_adapter_id()
+        if not adapter_id and self.notify_groups:
+            logger.warning("[Steam游戏库监控] ⚠️ 未找到可用平台适配器，无法推送通知！")
+            logger.warning("[Steam游戏库监控] 请确保已配置并启用至少一个消息平台（如 aiocqhttp）")
+
         logger.info(f"[Steam游戏库监控] 正在检查 {len(self.steam_ids_config)} 个用户...")
 
         for friend_config in self.steam_ids_config:
@@ -666,9 +708,13 @@ class SteamLibraryMonitor(Star):
             new_games = await self._check_friend_games(steam_id, nickname)
 
             if new_games and self.enable_notification:
-                await self._notify_new_games(steam_id, nickname, new_games)
+                if adapter_id:
+                    await self._notify_new_games(steam_id, nickname, new_games, adapter_id)
+                else:
+                    game_names = [g.get("name", "?") for g in new_games]
+                    logger.warning(f"[Steam游戏库监控] ⚠️ 检测到 {nickname} 的新游戏 ({', '.join(game_names)})，但无可用平台适配器，跳过推送")
 
-    async def _notify_new_games(self, steam_id: str, nickname: str, new_games: list[dict]):
+    async def _notify_new_games(self, steam_id: str, nickname: str, new_games: list[dict], adapter_id: str = ""):
         """发送新游戏购买通知。"""
         if not new_games:
             return
@@ -752,28 +798,41 @@ class SteamLibraryMonitor(Star):
                     ]
 
                     for group_id in group_ids:
+                        # 如果没有外部传入 adapter_id，动态获取
+                        aid = adapter_id or await self._get_adapter_id()
+                        if not aid:
+                            logger.error(f"[Steam游戏库监控] ❌ 无法向群 {group_id} 推送：无可用平台适配器")
+                            continue
+
+                        umo = self._build_group_umo(aid, group_id)
                         try:
-                            await self.context.send_message(group_id, MessageChain(msg_chain))
-                            logger.info(f"已发送 {nickname} 的新游戏通知到群 {group_id}")
+                            await self.context.send_message(umo, MessageChain(msg_chain))
+                            logger.info(f"[Steam游戏库监控] ✅ 已发送 {nickname} 的新游戏通知到群 {group_id}")
                         except Exception as e:
-                            logger.error(f"发送通知到群 {group_id} 失败: {e}")
+                            logger.error(f"[Steam游戏库监控] ❌ 发送通知到群 {group_id} 失败: {e}")
 
                 except Exception as e:
-                    logger.error(f"渲染图片失败: {e}")
+                    logger.error(f"[Steam游戏库监控] ❌ 渲染图片失败: {e}")
                     # 降级为纯文本通知
-                    await self._send_text_notify(full_message, group_ids)
+                    await self._send_text_notify(full_message, group_ids, adapter_id)
             else:
                 # 纯文本通知
-                await self._send_text_notify(full_message, group_ids)
+                await self._send_text_notify(full_message, group_ids, adapter_id)
 
-    async def _send_text_notify(self, message: str, group_ids: list[str]):
+    async def _send_text_notify(self, message: str, group_ids: list[str], adapter_id: str = ""):
         """发送文本通知。"""
         for group_id in group_ids:
+            aid = adapter_id or await self._get_adapter_id()
+            if not aid:
+                logger.error(f"[Steam游戏库监控] ❌ 无法向群 {group_id} 推送纯文本：无可用平台适配器")
+                continue
+
+            umo = self._build_group_umo(aid, group_id)
             try:
-                await self.context.send_message(group_id, message)
-                logger.info(f"已发送文本通知到群 {group_id}")
+                await self.context.send_message(umo, message)
+                logger.info(f"[Steam游戏库监控] ✅ 已发送文本通知到群 {group_id}")
             except Exception as e:
-                logger.error(f"发送文本通知到群 {group_id} 失败: {e}")
+                logger.error(f"[Steam游戏库监控] ❌ 发送文本通知到群 {group_id} 失败: {e}")
 
     @filter.command_group("steamlib")
     def steamlib(self):
@@ -1012,9 +1071,13 @@ class SteamLibraryMonitor(Star):
                 total_new += len(new_games)
                 game_names = [g.get("name", "未知游戏") for g in new_games]
                 results.append(f"👤 {nickname}:\n" + "\n".join([f"  - {n}" for n in game_names]))
+                # 触发推送通知
+                if self.enable_notification and self.notify_groups:
+                    logger.info(f"[Steam游戏库监控] check命令触发推送: {nickname} 新增 {len(new_games)} 个游戏")
+                    await self._notify_new_games(steam_id, nickname, new_games)
 
         if results:
-            yield event.plain_result(f"🆕 检测到 {total_new} 个新游戏:\n\n" + "\n\n".join(results))
+            yield event.plain_result(f"🆕 检测到 {total_new} 个新游戏:\n\n" + "\n\n".join(results) + "\n\n✅ 已触发推送通知")
         else:
             yield event.plain_result("✅ 所有好友暂无新增游戏")
 
@@ -1057,7 +1120,11 @@ class SteamLibraryMonitor(Star):
     @steamlib.command("help", alias={"sl帮助", "slhelp"})
     async def help(self, event: AstrMessageEvent):
         """显示帮助信息。"""
-        help_text = """🎮 Steam游戏库监控插件
+        # 尝试初始化适配器 ID（用于显示状态）
+        adapter_id = await self._get_adapter_id()
+        adapter_status = f"✅ {adapter_id}" if adapter_id else "⚠️ 未检测到（请确认已启用消息平台）"
+
+        help_text = f"""🎮 Steam游戏库监控插件
 
 📌 命令列表:
   /steamlib test - 测试推送效果（随机用户+游戏）
@@ -1066,20 +1133,27 @@ class SteamLibraryMonitor(Star):
   /steamlib info <steam_id> - 查看好友详细信息
   /steamlib help - 显示此帮助
 
+🔧 推送状态:
+  平台适配器: {adapter_status}
+
 ⚙️ 配置说明:
   在 AstrBot WebUI 插件配置中设置：
   - Steam Web API Key（必填）
+  - ITAD API Key（可选，用于获取史低价格）
   - SteamGridDB API Key（可选，用于获取游戏封面）
   - 要监控的Steam ID列表
-  - 推送通知的群号列表
-  - 消息模板（支持变量：{username} {gamename}）
+  - 推送通知的群号列表（直接填群号即可，插件会自动获取平台信息）
+  - 消息模板（支持变量：{{username}} {{gamename}}）
   - 是否显示游戏资讯（价格等）
 
 🔗 获取Steam Web API Key:
 https://steamcommunity.com/dev/apikey
 
 🔗 获取SteamGridDB API Key:
-https://www.steamgriddb.com/profile/preferences/api"""
+https://www.steamgriddb.com/profile/preferences/api
+
+🔗 获取ITAD API Key:
+https://isthereanydeal.com/apps/"""
         yield event.plain_result(help_text)
 
     @filter.on_astrbot_loaded()
