@@ -651,31 +651,46 @@ class SteamLibraryMonitor(Star):
 
     async def _check_friend_games(self, steam_id: str, nickname: str) -> list[dict]:
         """检查单个好友的游戏库变化。"""
+        tag = f"[{nickname}({steam_id})]"
+
         current_games = await self._get_owned_games(steam_id)
         if current_games is None:
+            logger.warning(f"[Steam游戏库监控] {tag} API返回None（私密资料/API错误/限流），跳过本次检查")
             return []
 
-        # 提取当前游戏ID列表
         current_game_ids = {game["appid"] for game in current_games}
-
-        # 获取缓存的游戏ID列表
         cached_game_ids = set(self.games_cache.get(steam_id, []))
 
-        # 如果是首次检查，只保存缓存不通知
+        # 首次检查：只记录缓存，不通知
         if steam_id not in self.games_cache:
             self.games_cache[steam_id] = list(current_game_ids)
             self._save_json(self.games_cache_file, self.games_cache)
-            logger.info(f"首次记录 {nickname} 的游戏库，共 {len(current_game_ids)} 个游戏")
+            logger.info(f"[Steam游戏库监控] {tag} 📝 首次记录游戏库，共 {len(current_game_ids)} 个游戏（不推送）")
             return []
 
-        # 检测新增游戏
+        # 对比差异
         new_game_ids = current_game_ids - cached_game_ids
+        removed_game_ids = cached_game_ids - current_game_ids
         new_games = [g for g in current_games if g["appid"] in new_game_ids]
 
-        # 更新缓存
+        # 逐用户详细日志
+        logger.info(
+            f"[Steam游戏库监控] {tag} "
+            f"📊 当前: {len(current_game_ids)} 个 | "
+            f"缓存: {len(cached_game_ids)} 个 | "
+            f"新增: {len(new_games)} | "
+            f"移除: {len(removed_game_ids)}"
+        )
+
         if new_games:
+            for g in new_games:
+                logger.info(f"[Steam游戏库监控] {tag} 🆕 新增游戏: {g.get('name', '?')} (appid={g.get('appid', '?')})")
+            # 有新游戏 → 更新缓存
             self.games_cache[steam_id] = list(current_game_ids)
             self._save_json(self.games_cache_file, self.games_cache)
+            logger.info(f"[Steam游戏库监控] {tag} ✅ 缓存已更新为 {len(current_game_ids)} 个游戏")
+        else:
+            logger.info(f"[Steam游戏库监控] {tag} ✅ 无新增游戏，跳过推送")
 
         return new_games
 
@@ -691,13 +706,18 @@ class SteamLibraryMonitor(Star):
             logger.warning("[Steam游戏库监控] ⚠️ 未找到可用平台适配器，无法推送通知！")
             logger.warning("[Steam游戏库监控] 请确保已配置并启用至少一个消息平台（如 aiocqhttp）")
 
-        logger.info(f"[Steam游戏库监控] 正在检查 {len(self.steam_ids_config)} 个用户...")
+        logger.info(f"[Steam游戏库监控] ========== 开始检查 {len(self.steam_ids_config)} 个用户 ==========")
+
+        total_new = 0
+        total_notified = 0
+        check_results = []
 
         for friend_config in self.steam_ids_config:
             steam_id = friend_config.get("steam_id", "")
             nickname = friend_config.get("nickname", "")
 
             if not steam_id:
+                logger.warning("[Steam游戏库监控] 跳过空Steam ID配置")
                 continue
 
             # 如果没有昵称，从Steam获取
@@ -708,22 +728,42 @@ class SteamLibraryMonitor(Star):
             new_games = await self._check_friend_games(steam_id, nickname)
 
             if new_games and self.enable_notification:
+                total_new += len(new_games)
                 if adapter_id:
                     await self._notify_new_games(steam_id, nickname, new_games, adapter_id)
+                    total_notified += len(new_games)
+                    check_results.append(f"  {nickname}: 🆕 {len(new_games)} 个新游戏 → ✅ 已推送")
                 else:
                     game_names = [g.get("name", "?") for g in new_games]
                     logger.warning(f"[Steam游戏库监控] ⚠️ 检测到 {nickname} 的新游戏 ({', '.join(game_names)})，但无可用平台适配器，跳过推送")
+                    check_results.append(f"  {nickname}: 🆕 {len(new_games)} 个新游戏 → ❌ 无适配器")
+            elif new_games and not self.enable_notification:
+                total_new += len(new_games)
+                check_results.append(f"  {nickname}: 🆕 {len(new_games)} 个新游戏 → ⏸️ 通知已禁用")
+            else:
+                check_results.append(f"  {nickname}: ✅ 无变化")
+
+        logger.info(f"[Steam游戏库监控] ========== 检查完毕 ==========")
+        if check_results:
+            for line in check_results:
+                logger.info(f"[Steam游戏库监控] {line}")
+        logger.info(
+            f"[Steam游戏库监控] 📊 汇总: 检查 {len(self.steam_ids_config)} 人 | "
+            f"新增 {total_new} 个游戏 | 推送 {total_notified} 条通知"
+        )
 
     async def _notify_new_games(self, steam_id: str, nickname: str, new_games: list[dict], adapter_id: str = ""):
         """发送新游戏购买通知。"""
         if not new_games:
             return
 
+        logger.info(f"[Steam游戏库监控] 📤 开始推送 {nickname} 的 {len(new_games)} 个新游戏通知...")
+
         # 获取推送群号列表
         group_ids = self.notify_groups
 
         if not group_ids:
-            logger.info(f"{nickname} 购买了新游戏，但未配置推送群号")
+            logger.warning(f"[Steam游戏库监控] ⚠️ {nickname} 购买了新游戏，但未配置推送群号，无法推送")
             return
 
         for game in new_games:
