@@ -232,8 +232,13 @@ class SteamLibraryMonitor(Star):
             self._client = httpx.AsyncClient(timeout=30.0)
         return self._client
 
-    async def _get_owned_games(self, steam_id: str) -> Optional[list[dict]]:
-        """获取用户拥有的所有游戏。"""
+    async def _get_owned_games(self, steam_id: str) -> Optional[tuple[list[dict], int]]:
+        """获取用户拥有的所有游戏。
+
+        Returns:
+            (games_list, api_game_count) 或 None
+            api_game_count 是 Steam API 返回的 game_count 字段（官方统计数）
+        """
         client = await self._get_client()
         url = "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/"
         params = {
@@ -241,14 +246,17 @@ class SteamLibraryMonitor(Star):
             "steamid": steam_id,
             "format": "json",
             "include_appinfo": 1,
-            "include_played_free_games": 1,
+            "include_played_free_games": 0,
         }
 
         try:
             response = await client.get(url, params=params)
             response.raise_for_status()
             data = response.json()
-            return data.get("response", {}).get("games", [])
+            resp = data.get("response", {})
+            games = resp.get("games", [])
+            api_count = resp.get("game_count", len(games))
+            return games, api_count
         except Exception as e:
             logger.error(f"获取 {steam_id} 的游戏列表失败: {e}")
             return None
@@ -653,13 +661,23 @@ class SteamLibraryMonitor(Star):
         """检查单个好友的游戏库变化。"""
         tag = f"[{nickname}({steam_id})]"
 
-        current_games = await self._get_owned_games(steam_id)
-        if current_games is None:
+        result = await self._get_owned_games(steam_id)
+        if result is None:
             logger.warning(f"[Steam游戏库监控] {tag} API返回None（私密资料/API错误/限流），跳过本次检查")
             return []
 
+        current_games, api_game_count = result
         current_game_ids = {game["appid"] for game in current_games}
         cached_game_ids = set(self.games_cache.get(steam_id, []))
+
+        # 统计对比日志
+        logger.info(
+            f"[Steam游戏库监控] {tag} 📊 "
+            f"API统计: {api_game_count} | "
+            f"实际获取: {len(current_games)} | "
+            f"缓存: {len(cached_game_ids)} | "
+            f"差异: 新增{len(current_game_ids - cached_game_ids)} 移除{len(cached_game_ids - current_game_ids)}"
+        )
 
         # 首次检查：只记录缓存，不通知
         if steam_id not in self.games_cache:
@@ -908,10 +926,12 @@ class SteamLibraryMonitor(Star):
             return
 
         # 获取游戏信息
-        games = await self._get_owned_games(steam_id)
-        if not games:
+        result = await self._get_owned_games(steam_id)
+        if not result:
             yield event.plain_result(f"❌ 无法获取 {nickname} 的游戏列表")
             return
+
+        games, _ = result
 
         # 随机选择一个游戏
         game = random.choice(games)
@@ -1157,6 +1177,69 @@ class SteamLibraryMonitor(Star):
 
         yield event.plain_result("\n".join(lines))
 
+    @steamlib.command("dump", alias={"sl导出", "sldump"})
+    async def dump_games(self, event: AstrMessageEvent, steam_id: str = ""):
+        """导出游戏列表（调试用，对比Steam主页数量）。"""
+        if not self.steam_api_key:
+            yield event.plain_result("❌ 请先在插件配置中设置 Steam Web API Key")
+            return
+
+        # 如果没指定steam_id，使用第一个配置的用户
+        if not steam_id:
+            if not self.steam_ids_config:
+                yield event.plain_result("❌ 未配置监控的Steam ID")
+                return
+            steam_id = self.steam_ids_config[0].get("steam_id", "")
+            nickname = self.steam_ids_config[0].get("nickname", "") or steam_id
+        else:
+            # 查找昵称
+            nickname = steam_id
+            for c in self.steam_ids_config:
+                if c.get("steam_id") == steam_id:
+                    nickname = c.get("nickname", "") or steam_id
+                    break
+
+        yield event.plain_result(f"🔄 正在导出 {nickname} 的游戏列表...")
+
+        result = await self._get_owned_games(steam_id)
+        if result is None:
+            yield event.plain_result(f"❌ 无法获取 {nickname} 的游戏列表（可能是私密资料）")
+            return
+
+        games, api_count = result
+
+        # 按名称排序
+        games_sorted = sorted(games, key=lambda g: g.get("name", ""))
+
+        lines = [
+            f"📋 {nickname} 的游戏库导出",
+            f"📊 Steam API统计数: {api_count}",
+            f"📊 实际获取数: {len(games)}",
+            f"📊 缓存数: {len(self.games_cache.get(steam_id, []))}",
+            f"{'='*30}",
+        ]
+
+        for i, game in enumerate(games_sorted, 1):
+            name = game.get("name", "未知")
+            appid = game.get("appid", 0)
+            playtime = game.get("playtime_forever", 0)
+            hours = playtime // 60
+            mins = playtime % 60
+            time_str = f"{hours}h{mins}m" if playtime > 0 else "未玩过"
+            lines.append(f"  {i}. {name} (appid={appid}, {time_str})")
+
+        # 如果游戏太多，分段发送
+        full_text = "\n".join(lines)
+        if len(full_text) > 4000:
+            # 只发送前2000个字符 + 统计
+            half = len(games_sorted) // 2
+            lines_first = lines[:half + 5]
+            lines_second = [f"📋 （续，共{len(games)}个）"] + [f"  {i+half+1}. {g.get('name','?')} (appid={g.get('appid',0)})" for i, g in enumerate(games_sorted[half:])]
+            yield event.plain_result("\n".join(lines_first))
+            yield event.plain_result("\n".join(lines_second))
+        else:
+            yield event.plain_result(full_text)
+
     @steamlib.command("help", alias={"sl帮助", "slhelp"})
     async def help(self, event: AstrMessageEvent):
         """显示帮助信息。"""
@@ -1171,6 +1254,7 @@ class SteamLibraryMonitor(Star):
   /steamlib list - 查看监控列表
   /steamlib check - 立即检查游戏库变动
   /steamlib info <steam_id> - 查看好友详细信息
+  /steamlib dump [steam_id] - 导出游戏列表（调试用）
   /steamlib help - 显示此帮助
 
 🔧 推送状态:
