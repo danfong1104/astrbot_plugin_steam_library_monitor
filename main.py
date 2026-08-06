@@ -229,8 +229,51 @@ class SteamLibraryMonitor(Star):
     async def _get_client(self) -> httpx.AsyncClient:
         """获取或创建HTTP客户端。"""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=30.0)
+            self._client = httpx.AsyncClient(
+                timeout=30.0,
+                limits=httpx.Limits(
+                    max_connections=10,
+                    max_keepalive_connections=5,
+                    keepalive_expiry=300,
+                ),
+            )
         return self._client
+
+    async def _reset_client(self):
+        """重置HTTP客户端（连接池故障时调用）。"""
+        try:
+            if self._client and not self._client.is_closed:
+                await self._client.aclose()
+        except Exception:
+            pass
+        self._client = None
+        logger.warning("[Steam游戏库监控] HTTP客户端已重置")
+
+    async def _request_with_retry(self, url: str, params: dict = None, method: str = "GET", json_data=None) -> Optional[dict]:
+        """带重试的HTTP请求，连接池故障时自动重建客户端。"""
+        for attempt in range(2):
+            client = await self._get_client()
+            try:
+                if method == "POST":
+                    resp = await client.post(url, params=params, json=json_data, timeout=15)
+                else:
+                    resp = await client.get(url, params=params, timeout=15)
+                resp.raise_for_status()
+                return resp.json()
+            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.PoolTimeout) as e:
+                if attempt == 0:
+                    logger.warning(f"[Steam游戏库监控] 连接异常 ({type(e).__name__}: {e})，重建客户端重试...")
+                    await self._reset_client()
+                    continue
+                logger.error(f"[Steam游戏库监控] 重试仍失败: {type(e).__name__}: {e}")
+                return None
+            except httpx.HTTPStatusError as e:
+                logger.error(f"[Steam游戏库监控] HTTP {e.response.status_code}: {url}")
+                return None
+            except Exception as e:
+                logger.error(f"[Steam游戏库监控] 请求异常: {type(e).__name__}: {e}")
+                return None
+        return None
 
     async def _get_owned_games(self, steam_id: str) -> Optional[tuple[list[dict], int]]:
         """获取用户拥有的所有游戏。
@@ -239,7 +282,6 @@ class SteamLibraryMonitor(Star):
             (games_list, api_game_count) 或 None
             api_game_count 是 Steam API 返回的 game_count 字段（官方统计数）
         """
-        client = await self._get_client()
         url = "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/"
         params = {
             "key": self.steam_api_key,
@@ -249,21 +291,17 @@ class SteamLibraryMonitor(Star):
             "include_played_free_games": 0,
         }
 
-        try:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            resp = data.get("response", {})
-            games = resp.get("games", [])
-            api_count = resp.get("game_count", len(games))
-            return games, api_count
-        except Exception as e:
-            logger.error(f"获取 {steam_id} 的游戏列表失败: {e}")
+        data = await self._request_with_retry(url, params=params)
+        if data is None:
             return None
+
+        resp = data.get("response", {})
+        games = resp.get("games", [])
+        api_count = resp.get("game_count", len(games))
+        return games, api_count
 
     async def _get_player_summary(self, steam_id: str) -> Optional[dict]:
         """获取玩家基本信息。"""
-        client = await self._get_client()
         url = "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/"
         params = {
             "key": self.steam_api_key,
@@ -271,15 +309,12 @@ class SteamLibraryMonitor(Star):
             "format": "json",
         }
 
-        try:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            data = response.json()
-            players = data.get("response", {}).get("players", [])
-            return players[0] if players else None
-        except Exception as e:
-            logger.error(f"获取 {steam_id} 的玩家信息失败: {e}")
+        data = await self._request_with_retry(url, params=params)
+        if data is None:
             return None
+
+        players = data.get("response", {}).get("players", [])
+        return players[0] if players else None
 
     async def _get_sgdb_cover(self, game_name: str, appid: int) -> Optional[str]:
         """从SteamGridDB获取游戏封面图URL。"""
@@ -318,8 +353,11 @@ class SteamLibraryMonitor(Star):
                 return data2["data"][0]["url"]
             return None
 
+        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as e:
+            logger.warning(f"获取SGDB封面连接异常: {type(e).__name__}: {e}")
+            await self._reset_client()
         except Exception as e:
-            logger.error(f"获取SGDB封面失败: {e}")
+            logger.error(f"获取SGDB封面失败: {type(e).__name__}: {e}")
             return None
 
     async def _search_game_on_itad(self, game_name: str) -> Optional[str]:
@@ -328,29 +366,21 @@ class SteamLibraryMonitor(Star):
             logger.debug("[ITAD] API Key未配置，跳过搜索")
             return None
 
-        client = await self._get_client()
-        try:
-            resp = await client.get(
-                f"{self.itad_api_base}/games/search/v1",
-                params={"key": self.itad_api_key, "title": game_name, "limit": 5},
-                timeout=10
-            )
-            if resp.status_code != 200:
-                logger.warning(f"[ITAD] 搜索 '{game_name}' 返回状态码: {resp.status_code}, body: {resp.text[:200]}")
-                return None
-
-            data = resp.json()
-            if not data or not isinstance(data, list) or len(data) == 0:
-                logger.warning(f"[ITAD] 搜索 '{game_name}' 无结果")
-                return None
-
-            gid = data[0].get("id")
-            title = data[0].get("title", "?")
-            logger.info(f"[ITAD] 搜索 '{game_name}' → 匹配 '{title}' (gid={gid})")
-            return gid
-        except Exception as e:
-            logger.error(f"[ITAD] 搜索 '{game_name}' 失败: {e}")
+        data = await self._request_with_retry(
+            f"{self.itad_api_base}/games/search/v1",
+            params={"key": self.itad_api_key, "title": game_name, "limit": 5},
+        )
+        if data is None:
             return None
+
+        if not isinstance(data, list) or len(data) == 0:
+            logger.warning(f"[ITAD] 搜索 '{game_name}' 无结果")
+            return None
+
+        gid = data[0].get("id")
+        title = data[0].get("title", "?")
+        logger.info(f"[ITAD] 搜索 '{game_name}' → 匹配 '{title}' (gid={gid})")
+        return gid
 
     async def _get_game_price_from_itad(self, gid: str) -> Optional[dict]:
         """从ITAD获取游戏价格和史低信息。"""
@@ -358,124 +388,106 @@ class SteamLibraryMonitor(Star):
             logger.debug(f"[ITAD] 获取价格跳过: api_key={'有' if self.itad_api_key else '无'}, gid={gid}")
             return None
 
-        client = await self._get_client()
-        try:
-            # 使用POST请求获取价格信息
-            resp = await client.post(
-                f"{self.itad_api_base}/games/prices/v3",
-                params={"key": self.itad_api_key, "country": "CN", "shops": 61},
-                json=[gid],
-                timeout=10
-            )
-            if resp.status_code != 200:
-                logger.warning(f"[ITAD] 价格API gid={gid} 返回状态码: {resp.status_code}, body: {resp.text[:300]}")
-                return None
-
-            data = resp.json()
-            if not data or not isinstance(data, list) or len(data) == 0:
-                logger.warning(f"[ITAD] 价格API gid={gid} 返回空数据")
-                return None
-
-            game_data = data[0]
-            deals = game_data.get("deals", [])
-            history_low = game_data.get("historyLow", {})
-
-            logger.info(f"[ITAD] gid={gid} deals数量: {len(deals)}, historyLow keys: {list(history_low.keys())}")
-
-            # 获取当前价格（从deals中找steam商店的）
-            current_price = None
-            original_price = None
-            discount = 0
-            steam_found = False
-
-            for deal in deals:
-                shop_name = deal.get("shop", {}).get("name", "")
-                if shop_name.lower() == "steam":
-                    price_info = deal.get("price", {})
-                    regular_info = deal.get("regular", {})
-                    current_price = price_info.get("amount")
-                    original_price = regular_info.get("amount")
-                    discount = deal.get("cut", 0)
-                    steam_found = True
-                    logger.info(f"[ITAD] gid={gid} Steam deal: price={current_price}, original={original_price}, cut={discount}%")
-                    break
-
-            if not steam_found:
-                shop_names = [d.get("shop", {}).get("name", "?") for d in deals[:5]]
-                logger.warning(f"[ITAD] gid={gid} 未找到Steam商店deal, 可用商店: {shop_names}")
-
-            # 获取史低价格（优先级：all > y1 > m3）
-            lowest_price = None
-            for period in ["all", "y1", "m3"]:
-                low_info = history_low.get(period)
-                if low_info and low_info.get("amount") is not None:
-                    lowest_price = low_info.get("amount")
-                    logger.info(f"[ITAD] gid={gid} 史低({period}): {lowest_price}")
-                    break
-
-            if lowest_price is None:
-                logger.warning(f"[ITAD] gid={gid} 无史低数据, historyLow={history_low}")
-
-            return {
-                "current": current_price,
-                "original": original_price,
-                "discount": discount,
-                "lowest": lowest_price,
-                "currency": "CNY"
-            }
-        except Exception as e:
-            logger.error(f"[ITAD] 获取价格失败 gid={gid}: {e}")
+        data = await self._request_with_retry(
+            f"{self.itad_api_base}/games/prices/v3",
+            params={"key": self.itad_api_key, "country": "CN", "shops": 61},
+            method="POST",
+            json_data=[gid],
+        )
+        if data is None:
             return None
+
+        if not isinstance(data, list) or len(data) == 0:
+            logger.warning(f"[ITAD] 价格API gid={gid} 返回空数据")
+            return None
+
+        game_data = data[0]
+        deals = game_data.get("deals", [])
+        history_low = game_data.get("historyLow", {})
+
+        logger.info(f"[ITAD] gid={gid} deals数量: {len(deals)}, historyLow keys: {list(history_low.keys())}")
+
+        # 获取当前价格（从deals中找steam商店的）
+        current_price = None
+        original_price = None
+        discount = 0
+        steam_found = False
+
+        for deal in deals:
+            shop_name = deal.get("shop", {}).get("name", "")
+            if shop_name.lower() == "steam":
+                price_info = deal.get("price", {})
+                regular_info = deal.get("regular", {})
+                current_price = price_info.get("amount")
+                original_price = regular_info.get("amount")
+                discount = deal.get("cut", 0)
+                steam_found = True
+                logger.info(f"[ITAD] gid={gid} Steam deal: price={current_price}, original={original_price}, cut={discount}%")
+                break
+
+        if not steam_found:
+            shop_names = [d.get("shop", {}).get("name", "?") for d in deals[:5]]
+            logger.warning(f"[ITAD] gid={gid} 未找到Steam商店deal, 可用商店: {shop_names}")
+
+        # 获取史低价格（优先级：all > y1 > m3）
+        lowest_price = None
+        for period in ["all", "y1", "m3"]:
+            low_info = history_low.get(period)
+            if low_info and low_info.get("amount") is not None:
+                lowest_price = low_info.get("amount")
+                logger.info(f"[ITAD] gid={gid} 史低({period}): {lowest_price}")
+                break
+
+        if lowest_price is None:
+            logger.warning(f"[ITAD] gid={gid} 无史低数据, historyLow={history_low}")
+
+        return {
+            "current": current_price,
+            "original": original_price,
+            "discount": discount,
+            "lowest": lowest_price,
+            "currency": "CNY"
+        }
 
     async def _get_game_price_from_steam(self, appid: int) -> Optional[dict]:
         """从Steam官方API获取游戏价格（备用方案）。"""
-        client = await self._get_client()
+        url = f"https://store.steampowered.com/api/appdetails?appids={appid}&cc=cn"
+        data = await self._request_with_retry(url)
 
-        try:
-            url = f"https://store.steampowered.com/api/appdetails?appids={appid}&cc=cn"
-            resp = await client.get(url, timeout=10)
-
-            if resp.status_code != 200:
-                return None
-
-            data = resp.json()
-            if not isinstance(data, dict):
-                return None
-
-            app_data = data.get(str(appid))
-            if not app_data or not isinstance(app_data, dict):
-                return None
-
-            if not app_data.get("success"):
-                return None
-
-            game_data = app_data.get("data", {})
-            if not isinstance(game_data, dict):
-                return None
-
-            # 检查是否免费
-            if game_data.get("is_free"):
-                return {"current": 0, "original": 0, "discount": 0, "lowest": 0, "currency": "CNY"}
-
-            price_data = game_data.get("price_overview")
-            if not price_data or not isinstance(price_data, dict):
-                return None
-
-            # 价格是以分为单位
-            current_price = price_data.get("final", 0) / 100
-            original_price = price_data.get("initial", 0) / 100
-            discount = price_data.get("discount_percent", 0)
-
-            return {
-                "current": current_price,
-                "original": original_price,
-                "discount": discount,
-                "lowest": None,  # Steam API不提供史低
-                "currency": price_data.get("currency", "CNY")
-            }
-        except Exception as e:
-            logger.error(f"Steam价格API失败: {e}")
+        if data is None or not isinstance(data, dict):
             return None
+
+        app_data = data.get(str(appid))
+        if not app_data or not isinstance(app_data, dict):
+            return None
+
+        if not app_data.get("success"):
+            return None
+
+        game_data = app_data.get("data", {})
+        if not isinstance(game_data, dict):
+            return None
+
+        # 检查是否免费
+        if game_data.get("is_free"):
+            return {"current": 0, "original": 0, "discount": 0, "lowest": 0, "currency": "CNY"}
+
+        price_data = game_data.get("price_overview")
+        if not price_data or not isinstance(price_data, dict):
+            return None
+
+        # 价格是以分为单位
+        current_price = price_data.get("final", 0) / 100
+        original_price = price_data.get("initial", 0) / 100
+        discount = price_data.get("discount_percent", 0)
+
+        return {
+            "current": current_price,
+            "original": original_price,
+            "discount": discount,
+            "lowest": None,  # Steam API不提供史低
+            "currency": price_data.get("currency", "CNY")
+        }
 
     async def _get_game_price(self, appid: int, game_name: str = "") -> Optional[dict]:
         """获取游戏价格信息（优先使用ITAD，备用Steam）。"""
@@ -540,15 +552,21 @@ class SteamLibraryMonitor(Star):
 
     async def _download_image(self, url: str, save_path: Path) -> bool:
         """下载图片并保存。"""
-        try:
+        for attempt in range(2):
             client = await self._get_client()
-            resp = await client.get(url, timeout=15)
-            if resp.status_code == 200:
+            try:
+                resp = await client.get(url, timeout=15)
+                resp.raise_for_status()
                 with open(save_path, "wb") as f:
                     f.write(resp.content)
                 return True
-        except Exception as e:
-            logger.error(f"下载图片失败: {e}")
+            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.PoolTimeout) as e:
+                if attempt == 0:
+                    await self._reset_client()
+                    continue
+                logger.error(f"下载图片失败: {type(e).__name__}: {e}")
+            except Exception as e:
+                logger.error(f"下载图片失败: {type(e).__name__}: {e}")
         return False
 
     async def _get_avatar(self, steam_id: str, avatar_url: str) -> Optional[Path]:
